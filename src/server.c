@@ -11,20 +11,20 @@
 #define PORT 9090
 #define HEADER_SIZE 8   // every message starts with an 8-byte label
 
-// recv() can receive fewer bytes than requested in one call.
-// Keep calling it until everything has actually arrived.
+// keeps calling recv() until every byte has arrived, since recv()
+// can return fewer bytes than requested in one call
 void recv_all(int socket_fd, void *data, size_t how_many_bytes) {
     size_t received_so_far = 0;
     while (received_so_far < how_many_bytes) {
         ssize_t got_now = recv(socket_fd, (char *)data + received_so_far,
                                 how_many_bytes - received_so_far, 0);
-        if (got_now <= 0) { perror("recv failed"); exit(1); } // safety check
+        if (got_now <= 0) { perror("recv failed"); exit(1); } // if recv() fails or connection closes, stop
         received_so_far += got_now;
     }
 }
 
-// send() can send fewer bytes than requested in one call.
-// Keep calling it until everything has actually been sent.
+// keeps calling send() until every byte has been sent, since send()
+// can send fewer bytes than requested in one call
 void send_all(int socket_fd, void *data, size_t how_many_bytes) {
     size_t sent_so_far = 0;
     while (sent_so_far < how_many_bytes) {
@@ -44,14 +44,21 @@ void handle_one_client(int client_socket, FILE *file, long file_size) {
     recv_all(client_socket, request_label, HEADER_SIZE);
 
     uint32_t total_pieces, this_piece_number;
-    memcpy(&total_pieces,      request_label,     4);
-    memcpy(&this_piece_number, request_label + 4, 4);
+    memcpy(&total_pieces,      request_label,     4); // move the bytes into memory location of total_pieces
+    memcpy(&this_piece_number, request_label + 4, 4); // move the bytes into memory location of this_piece_number
     total_pieces      = ntohl(total_pieces);       // fix number format
     this_piece_number = ntohl(this_piece_number);
 
     printf("Client wants piece %u of %u\n", this_piece_number, total_pieces);
 
-    // Work out which numbers in the file belong to this piece
+    // if the piece number is out of range, stop instead of reading garbage memory
+    if (total_pieces == 0 || this_piece_number == 0 || this_piece_number > total_pieces) {
+        fprintf(stderr, "Invalid request: piece %u of %u\n", this_piece_number, total_pieces);
+        close(client_socket);
+        return;
+    }
+
+    // Which numbers in the file belong to this piece
     long total_numbers     = file_size / 4;   // each number is 4 bytes
     long numbers_per_piece = (total_numbers + total_pieces - 1) / total_pieces;
     long start_number      = (this_piece_number - 1) * numbers_per_piece;
@@ -134,7 +141,7 @@ int main(int argc, char *argv[]) {
 
     printf("Listening on port %d ... (Ctrl+C to stop)\n", PORT);
 
-    // Wait for a connection, clone yourself, the clone
+    // Wait for a connection, clone the process, the clone
     // handles that connection completely then exits, the original
     // waits right here until the clone is done, then repeat
     while (1) {
