@@ -54,7 +54,6 @@ Generates a 1GB test file, runs the whole pipeline end to end, then
 checks the output files against what they should actually be (md5sum for
 the reassembly, and independently recomputed min/max/sort for Part 2). Each
 check prints PASS or FAIL so the user can see what broke if something did.
-Needs python3 for the ground-truth checks.
 
 ## Output files
 
