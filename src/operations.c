@@ -13,6 +13,7 @@ pthread_mutex_t lock;
 int *dataset;
 int total_numbers = 0;
 int num_threads = 1;
+int32_t *merge_temp = NULL;
 
 //structure to hold data for each thread 
 typedef struct {
@@ -52,11 +53,16 @@ int active_merges = 0;
 
 typedef struct {
     int start_index;
+    int mid_index;
     int end_index;
 } ThreadArgs;
 
 int compare_ints(const void *a, const void *b) {
-    return (*(int32_t*)a - *(int32_t*)b);
+    int32_t x = *(const int32_t *)a;
+    int32_t y = *(const int32_t *)b;
+    if (x < y) return -1;
+    if (x > y) return 1;
+    return 0;
 }
 
 // --- DATA_PARALLEL: Initial sorting of contiguous blocks (Hint 11.2.1) ---
@@ -68,22 +74,20 @@ void *sort_worker(void *arg) {
 }
 
 void merge(int start, int mid, int end) {
-    int32_t *temp = (int32_t *)malloc((end - start + 1) * sizeof(int32_t));
-    int i = start, j = mid + 1, k = 0;
+    int i = start, j = mid + 1, k = start;
     while (i <= mid && j <= end) {
-        if (dataset[i] <= dataset[j]) temp[k++] = dataset[i++];
-        else temp[k++] = dataset[j++];
+        if (dataset[i] <= dataset[j]) merge_temp[k++] = dataset[i++];
+        else merge_temp[k++] = dataset[j++];
     }
-    while (i <= mid) temp[k++] = dataset[i++];
-    while (j <= end) temp[k++] = dataset[j++];
-    for (i = start, k = 0; i <= end; i++, k++) dataset[i] = temp[k];
-    free(temp);
+    while (i <= mid) merge_temp[k++] = dataset[i++];
+    while (j <= end) merge_temp[k++] = dataset[j++];
+    for (i = start; i <= end; i++) dataset[i] = merge_temp[i];
 }
 
 // --- TASK_PARALLEL: Concurrent merge tasks coordinated via cond vars (Hint 11.2.2) ---
 void *merge_task(void *arg) {
     ThreadArgs *args = (ThreadArgs *)arg;
-    merge(args->start_index, args->start_index + (args->end_index - args->start_index) / 2, args->end_index);
+    merge(args->start_index, args->mid_index, args->end_index);
     free(args);
     pthread_mutex_lock(&merge_mutex);
     active_merges--;
@@ -139,6 +143,11 @@ int main(int argc,char *argv[]) {
 
     // Allocate memory and read all binary data at once
     dataset = malloc(total_numbers * sizeof(int));
+    if (dataset == NULL) {
+        perror("malloc dataset");
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
     fread(dataset, sizeof(int), total_numbers, file);
     fclose(file);
 
@@ -154,6 +163,11 @@ int main(int argc,char *argv[]) {
     //Allocate memory for threads and their data
     pthread_t *threads = malloc(num_threads * sizeof(pthread_t));
     ThreadData *thread_data = malloc(num_threads * sizeof(ThreadData));
+    merge_temp = malloc(total_numbers * sizeof(int32_t));
+    if (threads == NULL || thread_data == NULL || merge_temp == NULL) {
+        perror("malloc threads/thread_data/merge_temp");
+        exit(EXIT_FAILURE);
+    }
 
     printf("\nSpawning workers...\n");
 
@@ -169,7 +183,10 @@ int main(int argc,char *argv[]) {
         thread_data[i].end_index = (i == num_threads - 1) ? total_numbers : current_index + chunk_size;
         current_index = thread_data[i].end_index;
 
-        pthread_create(&threads[i], NULL, worker_function, (void *)&thread_data[i]);
+        if (pthread_create(&threads[i], NULL, worker_function, (void *)&thread_data[i]) != 0) {
+            perror("pthread_create worker");
+            exit(EXIT_FAILURE);
+        }
     }
 
     //wait for all threads to finish their work
@@ -199,48 +216,87 @@ int main(int argc,char *argv[]) {
     int chunk = total_numbers / num_threads;
     for (int i = 0; i < num_threads; ++i) {
         ThreadArgs *args = malloc(sizeof(ThreadArgs));
+        if (args == NULL) { perror("malloc ThreadArgs (sort)"); exit(EXIT_FAILURE); }
         args->start_index = i * chunk;
         args->end_index = (i == num_threads - 1) ? (total_numbers - 1) : ((i + 1) * chunk - 1);
-        pthread_create(&threads[i], NULL, sort_worker, args);
+        if (pthread_create(&threads[i], NULL, sort_worker, args) != 0) {
+            perror("pthread_create sort_worker");
+            exit(EXIT_FAILURE);
+        }
     }
     for (int i = 0; i < num_threads; ++i) pthread_join(threads[i], NULL);
 
     // Phase 3: Task Parallelism - Bottom-up parallel merging (Hint 11.2.3)
-    for (int size = chunk; size < total_numbers; size *= 2) {
+    int num_runs = num_threads;
+    int *run_start = malloc((num_runs + 1) * sizeof(int));
+    if (run_start == NULL) { perror("malloc run_start"); exit(EXIT_FAILURE); }
+    for (int i = 0; i < num_runs; i++) run_start[i] = i * chunk;
+    run_start[num_runs] = total_numbers; // sentinel: end of the last run
+
+    while (num_runs > 1) {
+        int *next_run_start = malloc((num_runs / 2 + 2) * sizeof(int));
+        if (next_run_start == NULL) { perror("malloc next_run_start"); exit(EXIT_FAILURE); }
+
         pthread_mutex_lock(&merge_mutex);
         active_merges = 0;
         pthread_mutex_unlock(&merge_mutex);
-        for (int i = 0; i < total_numbers - size; i += 2 * size) {
+
+        int new_count = 0, i = 0;
+        for (; i + 1 < num_runs; i += 2) {
             ThreadArgs *args = malloc(sizeof(ThreadArgs));
-            args->start_index = i;
-            args->end_index = (i + 2 * size - 1 < total_numbers - 1) ? (i + 2 * size - 1) : (total_numbers - 1);
+            if (args == NULL) { perror("malloc ThreadArgs (merge)"); exit(EXIT_FAILURE); }
+            int seg_start = run_start[i];
+            args->start_index = seg_start;
+            args->mid_index   = run_start[i + 1] - 1;
+            args->end_index   = run_start[i + 2] - 1;
+
             pthread_mutex_lock(&merge_mutex);
             active_merges++;
             pthread_mutex_unlock(&merge_mutex);
+
             pthread_t t;
-            pthread_create(&t, NULL, merge_task, args);
+            if (pthread_create(&t, NULL, merge_task, args) != 0) {
+                perror("pthread_create merge_task");
+                exit(EXIT_FAILURE);
+            }
             pthread_detach(t); // Detach as we use cond_wait to sync the level
+
+            next_run_start[new_count++] = seg_start;
         }
+        if (i < num_runs) {
+            // odd run out: nothing to pair it with this level, carry it to the next one unmerged
+            next_run_start[new_count++] = run_start[i];
+        }
+        next_run_start[new_count] = total_numbers; // sentinel
+
         // Coordinate merge levels via condition variables (Hint 11.2.3)
         pthread_mutex_lock(&merge_mutex);
         while (active_merges > 0) pthread_cond_wait(&merge_cond, &merge_mutex);
         pthread_mutex_unlock(&merge_mutex);
+
+        free(run_start);
+        run_start = next_run_start;
+        num_runs = new_count;
     }
+    free(run_start);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
     long time_ms = (end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000;
 
     // Output required results and logs (Section 6)
     FILE *out = fopen("result_sorted.dat", "wb");
+    if (out == NULL) { perror("fopen result_sorted.dat"); exit(EXIT_FAILURE); }
     fwrite(dataset, sizeof(int32_t), total_numbers, out);
     fclose(out);
 
     FILE *log = fopen("execution_log.txt", "a");
+    if (log == NULL) { perror("fopen execution_log.txt"); exit(EXIT_FAILURE); }
     fprintf(log, "[PART2] THREADS=%d | DATA_PARALLEL=min,max | TASK_PARALLEL=sort\n", num_threads);
     fprintf(log, "[PART2] TIME_MS=%ld | SORT_ALGO=parallel_merge_sort\n[STATUS] SUCCESS\n", time_ms);
     fclose(log);
 
     free(dataset);
+    free(merge_temp);
     pthread_mutex_destroy(&lock);
 
     free(threads);

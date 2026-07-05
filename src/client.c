@@ -191,7 +191,7 @@ int main(int argc, char *argv[]) {
 
     printf("[client] Wrote reassembled.dat (%ld bytes).\n", real_total_size);
 
-    FILE *log = fopen("execution_log.txt", "a");
+    FILE *log = fopen("execution_log.txt", "w");
     if (log) {
         fprintf(log, "[PART1] CHUNKS=%d | PROCS=%d | SYNC_USED=mutex,sem,condvar\n", N, N);
         fclose(log);
