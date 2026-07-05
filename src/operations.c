@@ -200,13 +200,13 @@ int main(int argc,char *argv[]) {
 
     FILE *f_min = fopen("result_min.txt", "w");
     if (f_min != NULL) {
-        fprintf(f_min, "%d\n", global_min);
+        fprintf(f_min, "MIN=%d\n", global_min);
         fclose(f_min);
     }
 
     FILE *f_max = fopen("result_max.txt", "w");
     if (f_max != NULL) {
-        fprintf(f_max, "%d\n", global_max);
+        fprintf(f_max, "MAX=%d\n", global_max);
         fclose(f_max);
     }
 
